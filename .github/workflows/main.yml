@@ -21,147 +21,91 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    - name: Install Builder Dependencies
+    - name: Install Dependencies
       run: |
         echo "http://dl-cdn.alpinelinux.org/alpine/edge/community" >> /etc/apk/repositories
-        echo "http://dl-cdn.alpinelinux.org/alpine/edge/main" >> /etc/apk/repositories
         apk update
-        
-        apk add --no-cache \
-          bash wget curl xz cpio \
-          gawk squashfs-tools xorriso \
-          grub grub-bios grub-efi \
-          mtools dosfstools dracut kmod jq sed \
-          tar zstd
+        apk add --no-cache bash wget curl squashfs-tools xorriso grub grub-efi mtools dosfstools dracut kmod jq sed
 
     - name: Prepare Workspace
       run: |
-        mkdir -p build_area
-        mkdir -p modules_stage
         mkdir -p iso_build/boot/grub
         mkdir -p iso_build/LiveOS
 
-    # --- PART 1: ROOT FILESYSTEM ---
-    - name: Download & Unpack Stage 3
+    # --- PART 1: EXTRACT BASE FROM ISO ---
+    - name: Download & Extract Base System
       run: |
-        echo "Downloading Gentoo Stage 3 OpenRC..."
+        echo "Downloading Gentoo Minimal ISO..."
         # 2026-01-14 Snapshot
-        wget -q --show-progress -O stage3.tar.xz "https://distfiles.gentoo.org/releases/amd64/autobuilds/20260114T140056Z/stage3-amd64-openrc-20260114T140056Z.tar.xz"
+        wget -q --show-progress -O minimal.iso "https://distfiles.gentoo.org/releases/amd64/autobuilds/20260114T140056Z/install-amd64-minimal-20260114T140056Z.iso"
         
-        echo "Creating Root Filesystem..."
-        mkdir -p squashfs-root
-        tar xpf stage3.tar.xz -C squashfs-root --numeric-owner
+        mkdir -p mnt_iso
+        mount -o loop minimal.iso mnt_iso
         
-        # Cleanup
-        rm -rf squashfs-root/usr/share/doc
-        rm -rf squashfs-root/usr/share/man
-        rm -rf squashfs-root/var/db/repos/gentoo
+        echo "Extracting Kernel..."
+        # The kernel is usually named 'gentoo' or 'vmlinuz' on the ISO
+        KERNEL_PATH=$(find mnt_iso -name "gentoo" -o -name "vmlinuz" | head -n 1)
+        cp "$KERNEL_PATH" iso_build/boot/kernel
+        
+        echo "Extracting Root Filesystem..."
+        # Unsquash the ISO's existing rootfs. This gives us a full working Gentoo base immediately.
+        # No need to download Stage 3 separately.
+        unsquashfs -d squashfs-root mnt_iso/image.squashfs
+        
+        umount mnt_iso
+        rm minimal.iso
 
-    # --- PART 2: CONFIGURATION ---
-    - name: Apply Overlay & Config
+    # --- PART 2: CUSTOMIZE ---
+    - name: Customize System
       run: |
+        # 1. Apply Overlay (Your custom files)
         if [ -d "overlay" ]; then
           echo "Applying 'overlay/'..."
           cp -ruv overlay/* squashfs-root/
         fi
         
-        # Branding
+        # 2. Branding
         if [ -f squashfs-root/etc/os-release ]; then
            sed -i 's/^NAME=.*/NAME="Gentoo Linux Next"/' squashfs-root/etc/os-release
            sed -i 's/^PRETTY_NAME=.*/PRETTY_NAME="Gentoo Linux Next"/' squashfs-root/etc/os-release
         fi
         echo "Gentoo Linux Next" > squashfs-root/etc/issue
         
-        # Enable Root Login (Empty Password)
+        # 3. Unlock Root (Empty Password)
         sed -i 's/^root:[^:]*:/root::/' squashfs-root/etc/shadow
-        
-        # Essential Service Symlinks
-        ln -sf /etc/init.d/udev squashfs-root/etc/runlevels/sysinit/udev || true
-        ln -sf /etc/init.d/udev-trigger squashfs-root/etc/runlevels/sysinit/udev-trigger || true
 
-    # --- PART 3: EXTRACT KERNEL FROM ISO ---
-    - name: Extract Kernel & Modules (From Minimal ISO)
-      id: kernel
+    # --- PART 3: INITRAMFS ---
+    - name: Regenerate Initramfs
+      id: initramfs
       run: |
-        echo "Downloading Gentoo Minimal ISO (Donor)..."
-        wget -q --show-progress -O minimal.iso "https://distfiles.gentoo.org/releases/amd64/autobuilds/20260114T140056Z/install-amd64-minimal-20260114T140056Z.iso"
-        
-        mkdir -p mnt_iso mnt_squash
-        
-        echo "Mounting ISO..."
-        mount -o loop minimal.iso mnt_iso
-        
-        # 1. Grab Kernel
-        # Gentoo ISOs usually have kernel at /boot/gentoo or /gentoo
-        if [ -f mnt_iso/boot/gentoo ]; then
-          cp mnt_iso/boot/gentoo iso_build/boot/kernel
-        elif [ -f mnt_iso/gentoo ]; then
-          cp mnt_iso/gentoo iso_build/boot/kernel
-        else
-          # Fallback search
-          find mnt_iso -name "gentoo" -type f -exec cp {} iso_build/boot/kernel \; -quit
-        fi
-        
-        if [ ! -f iso_build/boot/kernel ]; then
-          echo "CRITICAL ERROR: Could not find kernel image in ISO!"
-          ls -R mnt_iso
-          exit 1
-        fi
-        
-        # 2. Grab Modules
-        # Modules are inside the image.squashfs within the ISO
-        if [ -f mnt_iso/image.squashfs ]; then
-           echo "Mounting embedded image.squashfs..."
-           mount -o loop mnt_iso/image.squashfs mnt_squash
-           
-           echo "Copying modules..."
-           mkdir -p squashfs-root/lib/modules
-           cp -av mnt_squash/lib/modules/* squashfs-root/lib/modules/
-           
-           umount mnt_squash
-        else
-           echo "CRITICAL ERROR: Could not find image.squashfs in ISO!"
-           exit 1
-        fi
-        
-        umount mnt_iso
-        
-        # 3. Detect Version
+        # Detect the kernel version from the extracted rootfs modules
         FULL_KVER=$(ls squashfs-root/lib/modules/ | head -n 1)
-        
-        if [ -z "$FULL_KVER" ]; then
-           echo "CRITICAL ERROR: No modules found in extracted path!"
-           exit 1
-        fi
-        
-        echo "Extracted Kernel Version: $FULL_KVER"
+        echo "Detected Kernel Version: $FULL_KVER"
         echo "full_version=$FULL_KVER" >> $GITHUB_ENV
-
-    # --- PART 4: INITRAMFS ---
-    - name: Generate Initramfs
-      run: |
-        echo "Modules available in: squashfs-root/lib/modules/${{ env.full_version }}"
         
-        # Create a local module path for Dracut
+        # Prepare modules for Dracut (It needs them in /lib/modules on the host)
         mkdir -p /lib/modules
-        cp -r squashfs-root/lib/modules/${{ env.full_version }} /lib/modules/
+        cp -r squashfs-root/lib/modules/$FULL_KVER /lib/modules/
         
-        depmod -a -b squashfs-root "${{ env.full_version }}"
+        # Update module dependencies for the modified root
+        depmod -a -b squashfs-root "$FULL_KVER"
         
-        echo "Generating initramfs..."
-        dracut --kver "${{ env.full_version }}" --force -N --xz \
+        echo "Generating Initramfs..."
+        dracut --kver "$FULL_KVER" --force -N --xz \
         --kernel-image iso_build/boot/kernel \
-        --kmoddir /lib/modules/${{ env.full_version }} \
+        --kmoddir /lib/modules/$FULL_KVER \
         --omit "systemd systemd-initrd systemd-networkd systemd-udevd lvm mdraid multipath" \
         --add "base bash dmsquash-live pollcdrom busybox" \
         --add-drivers "squashfs loop overlay isofs cdrom sr_mod" \
         iso_build/boot/initramfs.img
 
-    # --- PART 5: ISO PACKAGING ---
-    - name: Configure GRUB
+    # --- PART 4: REPACK ISO ---
+    - name: Finalize ISO
       run: |
+        # Download Wallpaper
         wget -q -O iso_build/boot/grub/splash.jpg "https://c4.wallpaperflare.com/wallpaper/897/820/61/gentoo-linux-mint-unix-linux-hd-wallpaper-preview.jpg"
         
+        # GRUB Config
         cat <<EOF > iso_build/boot/grub/grub.cfg
         insmod all_video
         insmod gfxterm
@@ -185,10 +129,10 @@ jobs:
         }
         EOF
 
-    - name: Build ISO Image
-      run: |
+        # Create compressed RootFS image
         mksquashfs squashfs-root iso_build/LiveOS/rootfs.img -comp gzip -noappend
         
+        # Build ISO
         grub-mkrescue -o gentoo-next.iso iso_build \
           --volid "GENTOO_NEXT" \
           --product-name "Gentoo Linux Next" \
@@ -199,7 +143,7 @@ jobs:
       with:
         name: gentoo-next-iso
         path: gentoo-next.iso
-
+    
     - name: Create Release
       if: ${{ inputs.create_release == true }}
       uses: softprops/action-gh-release@v1
@@ -208,8 +152,8 @@ jobs:
         name: "Gentoo Linux Next"
         body: |
           ### Gentoo Linux Next
-          - **Base**: Stage 3 OpenRC (2026-01-14)
-          - **Kernel**: ${{ env.full_version }} (Extracted from Minimal ISO)
+          - **Base**: Gentoo Minimal ISO (2026-01-14)
+          - **Kernel**: ${{ env.full_version }}
         files: gentoo-next.iso
         prerelease: true
       env:
