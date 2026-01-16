@@ -25,6 +25,7 @@ jobs:
       run: |
         echo "http://dl-cdn.alpinelinux.org/alpine/edge/community" >> /etc/apk/repositories
         apk update
+        # Added 'xorriso' to replace mount command
         apk add --no-cache bash wget curl squashfs-tools xorriso grub grub-efi mtools dosfstools dracut kmod jq sed
 
     - name: Prepare Workspace
@@ -32,7 +33,7 @@ jobs:
         mkdir -p iso_build/boot/grub
         mkdir -p iso_build/LiveOS
 
-    # --- PART 1: EXTRACT BASE FROM ISO ---
+    # --- PART 1: EXTRACT BASE FROM ISO (NO MOUNTING) ---
     - name: Download & Extract Base System
       run: |
         echo "Downloading Gentoo Minimal ISO..."
@@ -40,20 +41,38 @@ jobs:
         wget -q --show-progress -O minimal.iso "https://distfiles.gentoo.org/releases/amd64/autobuilds/20260114T140056Z/install-amd64-minimal-20260114T140056Z.iso"
         
         mkdir -p mnt_iso
-        mount -o loop minimal.iso mnt_iso
         
-        echo "Extracting Kernel..."
-        # The kernel is usually named 'gentoo' or 'vmlinuz' on the ISO
+        echo "Extracting ISO contents (using xorriso)..."
+        # Extract ISO without requiring root/loop devices
+        xorriso -osirrox on -indev minimal.iso -extract / mnt_iso
+        
+        echo "Locating Kernel..."
+        # Kernel is usually named 'gentoo' or 'vmlinuz'
         KERNEL_PATH=$(find mnt_iso -name "gentoo" -o -name "vmlinuz" | head -n 1)
+        
+        if [ -z "$KERNEL_PATH" ]; then
+           echo "CRITICAL ERROR: Could not find kernel in extracted ISO!"
+           find mnt_iso
+           exit 1
+        fi
+        
+        echo "Found Kernel at: $KERNEL_PATH"
         cp "$KERNEL_PATH" iso_build/boot/kernel
         
         echo "Extracting Root Filesystem..."
-        # Unsquash the ISO's existing rootfs. This gives us a full working Gentoo base immediately.
-        # No need to download Stage 3 separately.
-        unsquashfs -d squashfs-root mnt_iso/image.squashfs
+        # Gentoo Minimal ISO stores rootfs in 'image.squashfs'
+        SQUASH_PATH=$(find mnt_iso -name "image.squashfs" | head -n 1)
         
-        umount mnt_iso
-        rm minimal.iso
+        if [ -z "$SQUASH_PATH" ]; then
+           echo "CRITICAL ERROR: image.squashfs not found!"
+           exit 1
+        fi
+        
+        # Unpack the rootfs
+        unsquashfs -d squashfs-root "$SQUASH_PATH"
+        
+        # Cleanup
+        rm -rf mnt_iso minimal.iso
 
     # --- PART 2: CUSTOMIZE ---
     - name: Customize System
@@ -80,6 +99,12 @@ jobs:
       run: |
         # Detect the kernel version from the extracted rootfs modules
         FULL_KVER=$(ls squashfs-root/lib/modules/ | head -n 1)
+        
+        if [ -z "$FULL_KVER" ]; then
+           echo "CRITICAL ERROR: No modules found in squashfs-root/lib/modules/"
+           exit 1
+        fi
+        
         echo "Detected Kernel Version: $FULL_KVER"
         echo "full_version=$FULL_KVER" >> $GITHUB_ENV
         
@@ -87,7 +112,7 @@ jobs:
         mkdir -p /lib/modules
         cp -r squashfs-root/lib/modules/$FULL_KVER /lib/modules/
         
-        # Update module dependencies for the modified root
+        # Update module dependencies
         depmod -a -b squashfs-root "$FULL_KVER"
         
         echo "Generating Initramfs..."
