@@ -1,4 +1,4 @@
-name: Build Gentoo Next (Binary Release)
+name: Build Gentoo Linux Next
 on:
   workflow_dispatch:
     inputs:
@@ -21,13 +21,12 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    - name: Install Builder Dependencies (Alpine)
+    - name: Install Builder Dependencies
       run: |
         echo "http://dl-cdn.alpinelinux.org/alpine/edge/community" >> /etc/apk/repositories
         echo "http://dl-cdn.alpinelinux.org/alpine/edge/main" >> /etc/apk/repositories
         apk update
         
-        # Removed compilation tools (bison, flex, etc)
         apk add --no-cache \
           bash wget curl xz cpio \
           gawk squashfs-tools xorriso \
@@ -46,14 +45,14 @@ jobs:
     - name: Download & Unpack Stage 3
       run: |
         echo "Downloading Gentoo Stage 3 OpenRC..."
-        # Using a fixed date/url for stability, or swap to 'latest' logic if preferred
-        wget -q --show-progress -O stage3.tar.xz "https://distfiles.gentoo.org/releases/amd64/autobuilds/20251130T164554Z/stage3-amd64-openrc-20251130T164554Z.tar.xz"
+        # Updated to 2026-01-14 Snapshot
+        wget -q --show-progress -O stage3.tar.xz "https://distfiles.gentoo.org/releases/amd64/autobuilds/20260114T140056Z/stage3-amd64-openrc-20260114T140056Z.tar.xz"
         
         echo "Creating Root Filesystem..."
         mkdir -p squashfs-root
         tar xpf stage3.tar.xz -C squashfs-root --numeric-owner
         
-        # Cleanup unnecessary stage3 files to save space
+        # Cleanup
         rm -rf squashfs-root/usr/share/doc
         rm -rf squashfs-root/usr/share/man
         rm -rf squashfs-root/var/db/repos/gentoo
@@ -80,11 +79,11 @@ jobs:
         ln -sf /etc/init.d/udev squashfs-root/etc/runlevels/sysinit/udev || true
         ln -sf /etc/init.d/udev-trigger squashfs-root/etc/runlevels/sysinit/udev-trigger || true
 
-    # --- PART 3: KERNEL (BINARY) ---
-    - name: Install Distribution Kernel
+    # --- PART 3: KERNEL ---
+    - name: Install Kernel
       id: kernel
       run: |
-        echo "Fetching latest Gentoo Binary Kernel (Stable)..."
+        echo "Fetching latest Gentoo Kernel..."
         
         # Dynamic search for the latest stable 6.x kernel binpkg
         MIRROR_URL="https://distfiles.gentoo.org/releases/amd64/binpackages/6.6/x86-64/sys-kernel"
@@ -93,12 +92,11 @@ jobs:
         echo "Downloading $PKG_NAME..."
         wget -q "$MIRROR_URL/$PKG_NAME"
         
-        # Extract the .gpkg.tar (Gentoo Package Format)
+        # Extract the .gpkg.tar
         mkdir -p kernel_extract
         tar xf "$PKG_NAME" -C kernel_extract
         
-        # Extract the payload (image.tar.zst usually contains the files)
-        # Note: Structure inside gpkg varies, but usually installs to /boot and /lib
+        # Extract the payload
         tar --zstd -xf kernel_extract/image.tar.zst -C squashfs-root
         
         # Identify Version
@@ -107,20 +105,17 @@ jobs:
         echo "full_version=$FULL_KVER" >> $GITHUB_ENV
         
         # Move Kernel to ISO Boot location
-        # Gentoo bin installs to /boot/vmlinuz-..., we rename for GRUB simplicity
         cp squashfs-root/boot/vmlinuz* iso_build/boot/kernel
 
     # --- PART 4: INITRAMFS ---
-    - name: Generate Initramfs (Dracut)
+    - name: Generate Initramfs
       run: |
-        # Check available modules
         echo "Modules available in: squashfs-root/lib/modules/${{ env.full_version }}"
         
-        # Create a local module path for Dracut to read
+        # Create a local module path for Dracut
         mkdir -p /lib/modules
         cp -r squashfs-root/lib/modules/${{ env.full_version }} /lib/modules/
         
-        # Run depmod
         depmod -a -b squashfs-root "${{ env.full_version }}"
         
         echo "Generating initramfs..."
@@ -135,7 +130,6 @@ jobs:
     # --- PART 5: ISO PACKAGING ---
     - name: Configure GRUB
       run: |
-        # Download a wallpaper
         wget -q -O iso_build/boot/grub/splash.jpg "https://c4.wallpaperflare.com/wallpaper/897/820/61/gentoo-linux-mint-unix-linux-hd-wallpaper-preview.jpg"
         
         cat <<EOF > iso_build/boot/grub/grub.cfg
@@ -163,10 +157,8 @@ jobs:
 
     - name: Build ISO Image
       run: |
-        # Compress RootFS
         mksquashfs squashfs-root iso_build/LiveOS/rootfs.img -comp gzip -noappend
         
-        # Generate ISO
         grub-mkrescue -o gentoo-next.iso iso_build \
           --volid "GENTOO_NEXT" \
           --product-name "Gentoo Linux Next" \
@@ -183,12 +175,11 @@ jobs:
       uses: softprops/action-gh-release@v1
       with:
         tag_name: "v${{ github.run_number }}"
-        name: "Gentoo Next (Binary Build)"
+        name: "Gentoo Linux Next"
         body: |
           ### Gentoo Linux Next
-          - **Base**: Stage 3 OpenRC
-          - **Kernel**: ${{ env.full_version }} (Gentoo Binary)
-          - **Builder**: Alpine Linux
+          - **Base**: Stage 3 OpenRC (2026-01-14)
+          - **Kernel**: ${{ env.full_version }}
         files: gentoo-next.iso
         prerelease: true
       env:
