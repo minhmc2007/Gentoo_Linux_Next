@@ -25,59 +25,50 @@ jobs:
       run: |
         echo "http://dl-cdn.alpinelinux.org/alpine/edge/community" >> /etc/apk/repositories
         apk update
-        # Added 'xorriso' to replace mount command
-        apk add --no-cache bash wget curl squashfs-tools xorriso grub grub-efi mtools dosfstools dracut kmod jq sed
+        # Removed 'dracut', 'device-mapper', 'kmod' (Not needed anymore)
+        apk add --no-cache bash wget curl squashfs-tools xorriso grub grub-efi mtools dosfstools jq sed
 
     - name: Prepare Workspace
       run: |
         mkdir -p iso_build/boot/grub
-        mkdir -p iso_build/LiveOS
+        # Gentoo LiveCDs expect image.squashfs at the root, not in LiveOS/
+        # We will follow the standard Gentoo structure.
 
-    # --- PART 1: EXTRACT BASE FROM ISO (NO MOUNTING) ---
-    - name: Download & Extract Base System
+    # --- PART 1: EXTRACT ARTIFACTS ---
+    - name: Download & Extract ISO
       run: |
         echo "Downloading Gentoo Minimal ISO..."
         # 2026-01-14 Snapshot
         wget -q --show-progress -O minimal.iso "https://distfiles.gentoo.org/releases/amd64/autobuilds/20260114T140056Z/install-amd64-minimal-20260114T140056Z.iso"
         
         mkdir -p mnt_iso
-        
-        echo "Extracting ISO contents (using xorriso)..."
-        # Extract ISO without requiring root/loop devices
+        echo "Extracting ISO contents..."
         xorriso -osirrox on -indev minimal.iso -extract / mnt_iso
         
-        echo "Locating Kernel..."
-        # Kernel is usually named 'gentoo' or 'vmlinuz'
-        KERNEL_PATH=$(find mnt_iso -name "gentoo" -o -name "vmlinuz" | head -n 1)
-        
-        if [ -z "$KERNEL_PATH" ]; then
-           echo "CRITICAL ERROR: Could not find kernel in extracted ISO!"
-           find mnt_iso
-           exit 1
-        fi
-        
-        echo "Found Kernel at: $KERNEL_PATH"
+        # 1. Locate & Copy Kernel
+        KERNEL_PATH=$(find mnt_iso -name "gentoo" -type f | head -n 1)
         cp "$KERNEL_PATH" iso_build/boot/kernel
+        echo "Reusing Kernel: $KERNEL_PATH"
         
-        echo "Extracting Root Filesystem..."
-        # Gentoo Minimal ISO stores rootfs in 'image.squashfs'
+        # 2. Locate & Copy Initramfs (Reuse existing!)
+        # Usually named gentoo.igz or gentoo.xz
+        INITRD_PATH=$(find mnt_iso -name "gentoo.*gz" -type f -o -name "gentoo.xz" -type f | head -n 1)
+        cp "$INITRD_PATH" iso_build/boot/initramfs
+        echo "Reusing Initramfs: $INITRD_PATH"
+        
+        # 3. Locate RootFS
         SQUASH_PATH=$(find mnt_iso -name "image.squashfs" | head -n 1)
         
-        if [ -z "$SQUASH_PATH" ]; then
-           echo "CRITICAL ERROR: image.squashfs not found!"
-           exit 1
-        fi
-        
-        # Unpack the rootfs
+        echo "Unpacking Root Filesystem..."
         unsquashfs -d squashfs-root "$SQUASH_PATH"
         
         # Cleanup
         rm -rf mnt_iso minimal.iso
 
-    # --- PART 2: CUSTOMIZE ---
+    # --- PART 2: MODIFY ROOTFS ---
     - name: Customize System
       run: |
-        # 1. Apply Overlay (Your custom files)
+        # 1. Apply Overlay
         if [ -d "overlay" ]; then
           echo "Applying 'overlay/'..."
           cp -ruv overlay/* squashfs-root/
@@ -90,47 +81,22 @@ jobs:
         fi
         echo "Gentoo Linux Next" > squashfs-root/etc/issue
         
-        # 3. Unlock Root (Empty Password)
+        # 3. Unlock Root
         sed -i 's/^root:[^:]*:/root::/' squashfs-root/etc/shadow
 
-    # --- PART 3: INITRAMFS ---
-    - name: Regenerate Initramfs
-      id: initramfs
+    # --- PART 3: REPACK ISO ---
+    - name: Build Final ISO
       run: |
-        # Detect the kernel version from the extracted rootfs modules
-        FULL_KVER=$(ls squashfs-root/lib/modules/ | head -n 1)
+        # 1. Repack RootFS
+        # We put it at iso_build/image.squashfs because that's where the standard initramfs looks for it
+        echo "Compressing RootFS..."
+        mksquashfs squashfs-root iso_build/image.squashfs -comp gzip -noappend
         
-        if [ -z "$FULL_KVER" ]; then
-           echo "CRITICAL ERROR: No modules found in squashfs-root/lib/modules/"
-           exit 1
-        fi
-        
-        echo "Detected Kernel Version: $FULL_KVER"
-        echo "full_version=$FULL_KVER" >> $GITHUB_ENV
-        
-        # Prepare modules for Dracut (It needs them in /lib/modules on the host)
-        mkdir -p /lib/modules
-        cp -r squashfs-root/lib/modules/$FULL_KVER /lib/modules/
-        
-        # Update module dependencies
-        depmod -a -b squashfs-root "$FULL_KVER"
-        
-        echo "Generating Initramfs..."
-        dracut --kver "$FULL_KVER" --force -N --xz \
-        --kernel-image iso_build/boot/kernel \
-        --kmoddir /lib/modules/$FULL_KVER \
-        --omit "systemd systemd-initrd systemd-networkd systemd-udevd lvm mdraid multipath" \
-        --add "base bash dmsquash-live pollcdrom busybox" \
-        --add-drivers "squashfs loop overlay isofs cdrom sr_mod" \
-        iso_build/boot/initramfs.img
-
-    # --- PART 4: REPACK ISO ---
-    - name: Finalize ISO
-      run: |
-        # Download Wallpaper
+        # 2. GRUB Branding
         wget -q -O iso_build/boot/grub/splash.jpg "https://c4.wallpaperflare.com/wallpaper/897/820/61/gentoo-linux-mint-unix-linux-hd-wallpaper-preview.jpg"
         
-        # GRUB Config
+        # 3. GRUB Config
+        # We use standard Gentoo LinuxRC arguments here because we are reusing the Gentoo Initramfs
         cat <<EOF > iso_build/boot/grub/grub.cfg
         insmod all_video
         insmod gfxterm
@@ -144,24 +110,22 @@ jobs:
         set default=0
 
         menuentry "Gentoo Linux Next" {
-            linux /boot/kernel root=live:CDLABEL=GENTOO_NEXT rd.live.image rd.live.overlay console=tty0
-            initrd /boot/initramfs.img
+            # Standard Gentoo LiveCD Arguments
+            linux /boot/kernel root=/dev/ram0 init=/linuxrc looptype=squashfs loop=/image.squashfs cdroot console=tty0
+            initrd /boot/initramfs
         }
         
-        menuentry "Gentoo Linux Next (Ramdisk Mode)" {
-            linux /boot/kernel root=live:CDLABEL=GENTOO_NEXT rd.live.image rd.live.ram=1 console=tty0
-            initrd /boot/initramfs.img
+        menuentry "Gentoo Linux Next (Cache to RAM)" {
+            linux /boot/kernel root=/dev/ram0 init=/linuxrc looptype=squashfs loop=/image.squashfs cdroot docache console=tty0
+            initrd /boot/initramfs
         }
         EOF
 
-        # Create compressed RootFS image
-        mksquashfs squashfs-root iso_build/LiveOS/rootfs.img -comp gzip -noappend
-        
-        # Build ISO
+        # 4. Generate ISO
+        # Note: We don't need to specify version in env, we just build it.
         grub-mkrescue -o gentoo-next.iso iso_build \
           --volid "GENTOO_NEXT" \
-          --product-name "Gentoo Linux Next" \
-          --product-version "${{ env.full_version }}"
+          --product-name "Gentoo Linux Next"
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
@@ -178,7 +142,8 @@ jobs:
         body: |
           ### Gentoo Linux Next
           - **Base**: Gentoo Minimal ISO (2026-01-14)
-          - **Kernel**: ${{ env.full_version }}
+          - **Kernel**: Stock Gentoo Kernel (Reused)
+          - **Initramfs**: Stock Gentoo Initramfs (Reused)
         files: gentoo-next.iso
         prerelease: true
       env:
