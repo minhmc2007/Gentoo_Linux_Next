@@ -79,57 +79,63 @@ jobs:
         ln -sf /etc/init.d/udev squashfs-root/etc/runlevels/sysinit/udev || true
         ln -sf /etc/init.d/udev-trigger squashfs-root/etc/runlevels/sysinit/udev-trigger || true
 
-    # --- PART 3: KERNEL ---
-    - name: Install Kernel
+    # --- PART 3: EXTRACT KERNEL FROM ISO ---
+    - name: Extract Kernel & Modules (From Minimal ISO)
       id: kernel
       run: |
-        echo "Fetching latest Gentoo Kernel (23.0/x86-64-v3)..."
-        MIRROR_URL="https://distfiles.gentoo.org/releases/amd64/binpackages/23.0/x86-64-v3/sys-kernel/gentoo-kernel"
+        echo "Downloading Gentoo Minimal ISO (Donor)..."
+        wget -q --show-progress -O minimal.iso "https://distfiles.gentoo.org/releases/amd64/autobuilds/20260114T140056Z/install-amd64-minimal-20260114T140056Z.iso"
         
-        # Get package name
-        PKG_NAME=$(curl -s "$MIRROR_URL/" | grep -o 'gentoo-kernel-[0-9][0-9.-]*\.gpkg\.tar' | sort -V | tail -n 1)
+        mkdir -p mnt_iso mnt_squash
         
-        if [ -z "$PKG_NAME" ]; then
-          echo "CRITICAL ERROR: Could not find kernel package in $MIRROR_URL"
+        echo "Mounting ISO..."
+        mount -o loop minimal.iso mnt_iso
+        
+        # 1. Grab Kernel
+        # Gentoo ISOs usually have kernel at /boot/gentoo or /gentoo
+        if [ -f mnt_iso/boot/gentoo ]; then
+          cp mnt_iso/boot/gentoo iso_build/boot/kernel
+        elif [ -f mnt_iso/gentoo ]; then
+          cp mnt_iso/gentoo iso_build/boot/kernel
+        else
+          # Fallback search
+          find mnt_iso -name "gentoo" -type f -exec cp {} iso_build/boot/kernel \; -quit
+        fi
+        
+        if [ ! -f iso_build/boot/kernel ]; then
+          echo "CRITICAL ERROR: Could not find kernel image in ISO!"
+          ls -R mnt_iso
           exit 1
         fi
         
-        echo "Found Package: $PKG_NAME"
-        wget -q "$MIRROR_URL/$PKG_NAME"
-        
-        # Extract the .gpkg.tar
-        echo "Unpacking GPKG..."
-        mkdir -p kernel_extract
-        tar xf "$PKG_NAME" -C kernel_extract
-        
-        # FIXED: Find image.tar.* but EXCLUDE .sig files
-        IMAGE_PATH=$(find kernel_extract -name "image.tar.*" ! -name "*.sig" | head -n 1)
-        
-        if [ -z "$IMAGE_PATH" ]; then
-           echo "CRITICAL ERROR: No image archive found!"
-           # Debugging output to see what is actually there
-           find kernel_extract
+        # 2. Grab Modules
+        # Modules are inside the image.squashfs within the ISO
+        if [ -f mnt_iso/image.squashfs ]; then
+           echo "Mounting embedded image.squashfs..."
+           mount -o loop mnt_iso/image.squashfs mnt_squash
+           
+           echo "Copying modules..."
+           mkdir -p squashfs-root/lib/modules
+           cp -av mnt_squash/lib/modules/* squashfs-root/lib/modules/
+           
+           umount mnt_squash
+        else
+           echo "CRITICAL ERROR: Could not find image.squashfs in ISO!"
            exit 1
         fi
         
-        echo "Extracting Kernel from: $IMAGE_PATH"
-        # Extract content (modules/kernel) to rootfs
-        # tar xf auto-detects compression (xz or zstd)
-        tar xf "$IMAGE_PATH" -C squashfs-root
+        umount mnt_iso
         
-        # Identify Version
+        # 3. Detect Version
         FULL_KVER=$(ls squashfs-root/lib/modules/ | head -n 1)
         
         if [ -z "$FULL_KVER" ]; then
-           echo "CRITICAL ERROR: Could not detect kernel version in squashfs-root/lib/modules/"
+           echo "CRITICAL ERROR: No modules found in extracted path!"
            exit 1
         fi
         
-        echo "Detected Kernel Version: $FULL_KVER"
+        echo "Extracted Kernel Version: $FULL_KVER"
         echo "full_version=$FULL_KVER" >> $GITHUB_ENV
-        
-        # Move Kernel to ISO Boot location
-        cp squashfs-root/boot/vmlinuz* iso_build/boot/kernel
 
     # --- PART 4: INITRAMFS ---
     - name: Generate Initramfs
@@ -203,7 +209,7 @@ jobs:
         body: |
           ### Gentoo Linux Next
           - **Base**: Stage 3 OpenRC (2026-01-14)
-          - **Kernel**: ${{ env.full_version }}
+          - **Kernel**: ${{ env.full_version }} (Extracted from Minimal ISO)
         files: gentoo-next.iso
         prerelease: true
       env:
