@@ -45,7 +45,7 @@ jobs:
     - name: Download & Unpack Stage 3
       run: |
         echo "Downloading Gentoo Stage 3 OpenRC..."
-        # Updated to 2026-01-14 Snapshot
+        # 2026-01-14 Snapshot
         wget -q --show-progress -O stage3.tar.xz "https://distfiles.gentoo.org/releases/amd64/autobuilds/20260114T140056Z/stage3-amd64-openrc-20260114T140056Z.tar.xz"
         
         echo "Creating Root Filesystem..."
@@ -83,12 +83,21 @@ jobs:
     - name: Install Kernel
       id: kernel
       run: |
-        echo "Fetching latest Gentoo Kernel..."
+        echo "Fetching latest Gentoo Kernel (23.0/x86-64-v3)..."
         
-        # Dynamic search for the latest stable 6.x kernel binpkg
-        MIRROR_URL="https://distfiles.gentoo.org/releases/amd64/binpackages/6.6/x86-64/sys-kernel"
-        PKG_NAME=$(curl -s $MIRROR_URL/ | grep -o 'gentoo-kernel-bin-[0-9.]*-[0-9]\.gpkg\.tar' | sort -V | tail -n 1)
+        # Updated URL based on the log provided. 
+        # In 'binpackages', 'gentoo-kernel' is the binary version of the source kernel.
+        MIRROR_URL="https://distfiles.gentoo.org/releases/amd64/binpackages/23.0/x86-64-v3/sys-kernel/gentoo-kernel"
         
+        # Scrape the directory for the latest .gpkg.tar file
+        # Matches files like: gentoo-kernel-6.12.5-1.gpkg.tar
+        PKG_NAME=$(curl -s "$MIRROR_URL/" | grep -o 'gentoo-kernel-[0-9].*\.gpkg\.tar' | sort -V | tail -n 1)
+        
+        if [ -z "$PKG_NAME" ]; then
+          echo "CRITICAL ERROR: Could not find kernel package in $MIRROR_URL"
+          exit 1
+        fi
+
         echo "Downloading $PKG_NAME..."
         wget -q "$MIRROR_URL/$PKG_NAME"
         
@@ -96,7 +105,7 @@ jobs:
         mkdir -p kernel_extract
         tar xf "$PKG_NAME" -C kernel_extract
         
-        # Extract the payload
+        # Extract the payload (image.tar.zst)
         tar --zstd -xf kernel_extract/image.tar.zst -C squashfs-root
         
         # Identify Version
