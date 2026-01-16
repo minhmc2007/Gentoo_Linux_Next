@@ -87,29 +87,43 @@ jobs:
         
         MIRROR_URL="https://distfiles.gentoo.org/releases/amd64/binpackages/23.0/x86-64-v3/sys-kernel/gentoo-kernel"
         
-        # FIXED: Use strict regex to avoid capturing HTML characters like ">
-        # Matches: gentoo-kernel-6.12.63-1.gpkg.tar
-        PKG_NAME=$(curl -s "$MIRROR_URL/" | grep -o 'gentoo-kernel-[0-9][0-9.-]*\.gpkg\.tar' | sort -V | tail -n 1 | head -n 1)
+        # Regex to find package name (e.g., gentoo-kernel-6.12.63-1.gpkg.tar)
+        PKG_NAME=$(curl -s "$MIRROR_URL/" | grep -o 'gentoo-kernel-[0-9][0-9.-]*\.gpkg\.tar' | sort -V | tail -n 1)
         
-        # Sanity check
         if [ -z "$PKG_NAME" ]; then
           echo "CRITICAL ERROR: Could not find kernel package in $MIRROR_URL"
           exit 1
         fi
         
         echo "Found Package: $PKG_NAME"
-        echo "Downloading..."
         wget -q "$MIRROR_URL/$PKG_NAME"
         
         # Extract the .gpkg.tar
+        echo "Unpacking GPKG..."
         mkdir -p kernel_extract
         tar xf "$PKG_NAME" -C kernel_extract
         
-        # Extract the payload
-        tar --zstd -xf kernel_extract/image.tar.zst -C squashfs-root
+        # FIXED: Dynamically find the image.tar file (it might be in a subdir)
+        IMAGE_PATH=$(find kernel_extract -name "image.tar*" | head -n 1)
+        
+        if [ -z "$IMAGE_PATH" ]; then
+           echo "CRITICAL ERROR: No image.tar* found inside package!"
+           ls -R kernel_extract
+           exit 1
+        fi
+        
+        echo "Extracting Payload: $IMAGE_PATH"
+        # Extract content (modules/kernel) to rootfs
+        tar xf "$IMAGE_PATH" -C squashfs-root
         
         # Identify Version
         FULL_KVER=$(ls squashfs-root/lib/modules/ | head -n 1)
+        
+        if [ -z "$FULL_KVER" ]; then
+           echo "CRITICAL ERROR: Could not detect kernel version in squashfs-root/lib/modules/"
+           exit 1
+        fi
+        
         echo "Detected Kernel Version: $FULL_KVER"
         echo "full_version=$FULL_KVER" >> $GITHUB_ENV
         
