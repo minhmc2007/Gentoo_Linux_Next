@@ -84,10 +84,9 @@ jobs:
       id: kernel
       run: |
         echo "Fetching latest Gentoo Kernel (23.0/x86-64-v3)..."
-        
         MIRROR_URL="https://distfiles.gentoo.org/releases/amd64/binpackages/23.0/x86-64-v3/sys-kernel/gentoo-kernel"
         
-        # Regex to find package name (e.g., gentoo-kernel-6.12.63-1.gpkg.tar)
+        # Get package name
         PKG_NAME=$(curl -s "$MIRROR_URL/" | grep -o 'gentoo-kernel-[0-9][0-9.-]*\.gpkg\.tar' | sort -V | tail -n 1)
         
         if [ -z "$PKG_NAME" ]; then
@@ -103,17 +102,19 @@ jobs:
         mkdir -p kernel_extract
         tar xf "$PKG_NAME" -C kernel_extract
         
-        # FIXED: Dynamically find the image.tar file (it might be in a subdir)
-        IMAGE_PATH=$(find kernel_extract -name "image.tar*" | head -n 1)
+        # FIXED: Find image.tar.* but EXCLUDE .sig files
+        IMAGE_PATH=$(find kernel_extract -name "image.tar.*" ! -name "*.sig" | head -n 1)
         
         if [ -z "$IMAGE_PATH" ]; then
-           echo "CRITICAL ERROR: No image.tar* found inside package!"
-           ls -R kernel_extract
+           echo "CRITICAL ERROR: No image archive found!"
+           # Debugging output to see what is actually there
+           find kernel_extract
            exit 1
         fi
         
-        echo "Extracting Payload: $IMAGE_PATH"
+        echo "Extracting Kernel from: $IMAGE_PATH"
         # Extract content (modules/kernel) to rootfs
+        # tar xf auto-detects compression (xz or zstd)
         tar xf "$IMAGE_PATH" -C squashfs-root
         
         # Identify Version
