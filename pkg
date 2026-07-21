@@ -82,7 +82,7 @@ class PkgCache:
         self.logger.info("Updating package cache (Indexing)...")
         
         if not os.path.exists(REPO_PATH):
-            self.logger.warn(f"Repo not found at {REPO_PATH}. Skipping index.")
+            self.logger.warning(f"Repo not found at {REPO_PATH}. Skipping index.")
             return
 
         packages = []
@@ -110,7 +110,7 @@ class PkgCache:
 
     def search(self, keyword):
         if not os.path.exists(CACHE_FILE):
-            self.logger.warn("Cache does not exist. Please run 'pkg update' first.")
+            self.logger.warning("Cache does not exist. Please run 'pkg update' first.")
             self.logger.info("Falling back to 'emerge --search' (slow)...")
             return False
 
@@ -121,7 +121,7 @@ class PkgCache:
             results = [p for p in all_pkgs if keyword in p]
             
             if not results:
-                self.logger.warn(f"No packages found matching '{keyword}' in cache.")
+                self.logger.warning(f"No packages found matching '{keyword}' in cache.")
             else:
                 print(f"\n{PkgLogger.BOLD}Search Results (Cache Hit):{PkgLogger.ENDC}")
                 limit = 20
@@ -238,7 +238,7 @@ class PkgCore:
 
         except KeyboardInterrupt:
             print() 
-            self.logger.warn("Process killed by user.")
+            self.logger.warning("Process killed by user.")
             return False, ""
         except FileNotFoundError:
             self.logger.error(f"Command not found: {cmd_args[0]}")
@@ -259,7 +259,7 @@ class PkgCore:
             try:
                 confirm = input(f"{PkgLogger.WARNING}Continue? (Y/n): {PkgLogger.ENDC}")
                 if confirm.lower() not in ['', 'y', 'yes']:
-                    self.logger.warn("Aborted by user.")
+                    self.logger.warning("Aborted by user.")
                     return
             except KeyboardInterrupt:
                 print()
@@ -293,7 +293,7 @@ class PkgCore:
             try:
                 confirm = input(f"{PkgLogger.FAIL}Are you sure? (This can break things) (y/N): {PkgLogger.ENDC}")
                 if confirm.lower() not in ['y', 'yes']:
-                    self.logger.warn("Aborted.")
+                    self.logger.warning("Aborted.")
                     return
             except KeyboardInterrupt:
                 print()
@@ -316,7 +316,7 @@ class PkgCore:
             try:
                 confirm = input(f"{PkgLogger.HEADER}Ready to upgrade system (@world). Continue? (Y/n): {PkgLogger.ENDC}")
                 if confirm.lower() not in ['', 'y', 'yes']:
-                    self.logger.warn("Aborted.")
+                    self.logger.warning("Aborted.")
                     return
             except KeyboardInterrupt:
                 print()
@@ -336,7 +336,7 @@ class PkgCore:
 
     def _handle_error(self, output, original_cmd, env):
         if "The following USE changes are necessary" in output:
-            self.logger.warn("Detected missing USE flags / Keyword masking.")
+            self.logger.warning("Detected missing USE flags / Keyword masking.")
             if self.config["AUTOFIX"] == "true":
                 try:
                     ask = input(f"{PkgLogger.WARNING}Attempt automatic fix (autounmask)? (Y/n): {PkgLogger.ENDC}")
